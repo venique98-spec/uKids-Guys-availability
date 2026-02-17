@@ -1,4 +1,9 @@
-# app_fixed.py  (uKids Guys Availability Form - 2 multiselect UI, but saves Yes/No per service column)
+# app_fixed.py
+# uKids Guys Availability Form
+# - NO director
+# - UI: 2 sections with MOBILE-FRIENDLY CHECKBOXES (morning + evening)
+# - Output: STILL writes Yes/No into each service column in Google Sheets (like your current sheet)
+
 import time
 import random
 from io import BytesIO
@@ -58,11 +63,11 @@ TAB_SB = "uKids Guys SB"
 TAB_DEADLINES = "Deadlines"
 TAB_DATES = "Kids & Guys ServiceDates"
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _get_secret_any(*paths):
+    """Try multiple secret paths, return the first value found."""
     try:
         cur = st.secrets
     except Exception:
@@ -119,8 +124,13 @@ def gs_retry(func, *args, **kwargs):
 
 @st.cache_resource
 def get_spreadsheet():
+    """
+    Open the spreadsheet and return gspread Spreadsheet object.
+    Includes private_key newline fixer.
+    """
     sa = _get_secret_any(["gcp_service_account"], ["general", "gcp_service_account"])
     sheet_id = _get_secret_any(["GSHEET_ID"], ["general", "GSHEET_ID"])
+
     if not sa or not sheet_id:
         raise RuntimeError("Missing GSHEET_ID or gcp_service_account in secrets.")
 
@@ -154,7 +164,7 @@ def ws_get_df(ws) -> pd.DataFrame:
         flat = [r[0] for r in rows if r and str(r[0]).strip()]
         return pd.DataFrame(flat, columns=["Name"])
 
-    # If SB has first name in header row (common mistake)
+    # If first name mistakenly in header row
     if len(header) == 1 and header[0] and (not rows or (rows and len(rows[0]) <= 1)):
         maybe_first = str(header[0]).strip()
         if maybe_first.lower() not in ("name", "serving guy", "person", "serving person"):
@@ -276,7 +286,7 @@ def _is_truthy_service_day(v) -> bool:
 
 def _display_date_only(label: str) -> str:
     """
-    Turns:
+    Examples:
       '1 March Morning Service' -> '1 March'
       '3 April - Good Friday Morning Service' -> '3 April - Good Friday'
     """
@@ -287,14 +297,23 @@ def _display_date_only(label: str) -> str:
     return " ".join(s.split()).strip(" -")
 
 
-def _dedupe_keep_order(seq):
-    seen = set()
-    out = []
-    for x in seq:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
+def _build_display_map(labels: list[str]) -> dict:
+    """
+    display text -> actual label
+    Ensures display text is unique (adds (2), (3) if needed).
+    """
+    display_map = {}
+    used = set()
+    for lbl in labels:
+        base = _display_date_only(lbl)
+        disp = base
+        i = 2
+        while disp in used:
+            disp = f"{base} ({i})"
+            i += 1
+        used.add(disp)
+        display_map[disp] = lbl
+    return display_map
 
 
 def build_human_report(target_month_key: str, name: str, date_labels: list[str], yes_map: dict) -> str:
@@ -319,7 +338,7 @@ except Exception as e:
     st.error(f"Failed to load config from Google Sheets: {e}")
     st.stop()
 
-# Validate columns
+# Validate required columns
 for df, name, needed in [
     (deadlines_df, TAB_DEADLINES, {"month", "deadline_local", "timezone"}),
     (service_dates_all, TAB_DATES, {"target_month", "date", "label", "is_service_day"}),
@@ -329,7 +348,7 @@ for df, name, needed in [
         st.error(f"Google Sheet tab '{name}' is missing columns: {', '.join(sorted(miss))}")
         st.stop()
 
-# Guys list from SB
+# Names from SB
 guys = []
 if sb_df is not None and not sb_df.empty:
     possible_cols = [c for c in sb_df.columns if str(c).strip().lower() in ("name", "serving guy", "person", "serving person")]
@@ -378,36 +397,20 @@ if month_dates.empty:
 month_dates["_sort"] = month_dates["date"].map(_safe_parse_date_ymd)
 month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
 
-# IMPORTANT: these are the ACTUAL column names we must save
+# These are the ACTUAL label columns we must write to the sheet
 date_labels = month_dates["label"].astype(str).tolist()
 
-# Build morning/evening label lists
+# Split labels
 morning_labels = [l for l in date_labels if "morning" in l.lower()]
 evening_labels = [l for l in date_labels if "evening" in l.lower()]
 
-# Build display -> actual label mapping
-def _build_display_map(labels):
-    display_map = {}
-    used = set()
-    for lbl in labels:
-        base = _display_date_only(lbl)
-        disp = base
-        # avoid duplicates if any (rare, but safe)
-        i = 2
-        while disp in used:
-            disp = f"{base} ({i})"
-            i += 1
-        used.add(disp)
-        display_map[disp] = lbl
-    return display_map
-
+# display->label maps
 morning_display_map = _build_display_map(morning_labels)
 evening_display_map = _build_display_map(evening_labels)
-
 morning_options = list(morning_display_map.keys())
 evening_options = list(evening_display_map.keys())
 
-# Deadline
+
 def get_deadline_for_target_month(deadlines: pd.DataFrame, month_key: str):
     match = deadlines[deadlines["month"] == month_key]
     if match.empty:
@@ -417,8 +420,10 @@ def get_deadline_for_target_month(deadlines: pd.DataFrame, month_key: str):
     dl = parse_deadline_local(str(row["deadline_local"]).strip(), tz_name)
     return dl, tz_name
 
+
 deadline_dt, deadline_tz = get_deadline_for_target_month(deadlines_df, target_month_key)
 
+# Closed check
 is_closed = True
 if deadline_dt is not None:
     now_local = get_now_in_tz(deadline_tz)
@@ -434,7 +439,7 @@ if is_closed:
     )
     st.stop()
 
-# Header info
+# Info header (no auto-refresh)
 now_local = get_now_in_tz(deadline_tz)
 remaining_seconds = (deadline_dt - now_local).total_seconds()
 
@@ -456,7 +461,7 @@ if "answers" not in st.session_state:
 answers = st.session_state.answers
 
 # ─────────────────────────────────────────────────────────────
-# UI
+# Form UI
 # ─────────────────────────────────────────────────────────────
 st.subheader("Your details")
 if not guys:
@@ -467,17 +472,46 @@ answers["Q_NAME"] = st.selectbox("Please select your name", options=[""] + guys,
 
 st.subheader(f"Availability for {target_month_key}")
 
-answers["MORNING_SELECTED"] = st.multiselect(
-    "Which morning services are you available?",
-    options=morning_options,
-    default=answers.get("MORNING_SELECTED", []),
-)
+# ── MOBILE FRIENDLY: CHECKBOX LISTS + Select all / Clear buttons ──
+st.markdown("### Which morning services are you available?")
+m1, m2 = st.columns(2)
+with m1:
+    if st.button("Select all mornings"):
+        for opt in morning_options:
+            st.session_state[f"morn_{target_month_key}_{opt}"] = True
+with m2:
+    if st.button("Clear mornings"):
+        for opt in morning_options:
+            st.session_state[f"morn_{target_month_key}_{opt}"] = False
 
-answers["EVENING_SELECTED"] = st.multiselect(
-    "Which evening services are you available?",
-    options=evening_options,
-    default=answers.get("EVENING_SELECTED", []),
-)
+morning_selected = []
+for opt in morning_options:
+    key = f"morn_{target_month_key}_{opt}"
+    checked = st.checkbox(opt, key=key)
+    if checked:
+        morning_selected.append(opt)
+answers["MORNING_SELECTED"] = morning_selected
+
+st.divider()
+
+st.markdown("### Which evening services are you available?")
+e1, e2 = st.columns(2)
+with e1:
+    if st.button("Select all evenings"):
+        for opt in evening_options:
+            st.session_state[f"eve_{target_month_key}_{opt}"] = True
+with e2:
+    if st.button("Clear evenings"):
+        for opt in evening_options:
+            st.session_state[f"eve_{target_month_key}_{opt}"] = False
+
+evening_selected = []
+for opt in evening_options:
+    key = f"eve_{target_month_key}_{opt}"
+    checked = st.checkbox(opt, key=key)
+    if checked:
+        evening_selected.append(opt)
+answers["EVENING_SELECTED"] = evening_selected
 
 # Review
 st.subheader("Review")
@@ -497,6 +531,7 @@ submitted = st.button("Submit")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
+    # Hard deadline check
     now_check = get_now_in_tz(deadline_tz)
     if (deadline_dt - now_check).total_seconds() <= 0:
         st.error("Form is closed.")
@@ -506,16 +541,17 @@ if submitted:
         st.error("Please select your name.")
         st.stop()
 
-    # Convert selections back to the actual label columns
-    selected_morning_labels = {morning_display_map[d] for d in answers.get("MORNING_SELECTED", []) if d in morning_display_map}
-    selected_evening_labels = {evening_display_map[d] for d in answers.get("EVENING_SELECTED", []) if d in evening_display_map}
-
+    # Convert selected display options back to actual label columns
+    selected_morning_labels = {
+        morning_display_map[d] for d in answers.get("MORNING_SELECTED", []) if d in morning_display_map
+    }
+    selected_evening_labels = {
+        evening_display_map[d] for d in answers.get("EVENING_SELECTED", []) if d in evening_display_map
+    }
     selected_all = selected_morning_labels.union(selected_evening_labels)
 
-    # Build Yes/No map for each service label (this is what your sheet expects)
-    yes_map = {}
-    for lbl in date_labels:
-        yes_map[lbl] = "Yes" if lbl in selected_all else "No"
+    # Build Yes/No map for each service label (keeps your sheet format)
+    yes_map = {lbl: ("Yes" if lbl in selected_all else "No") for lbl in date_labels}
 
     now = datetime.utcnow().isoformat() + "Z"
     row_map = {
@@ -544,7 +580,7 @@ if submitted:
     st.code(report_text, language=None)
 
 # ─────────────────────────────────────────────────────────────
-# Admin: exports + non-responders (current month) + diagnostics
+# Admin: exports + non-responders (current month)
 # ─────────────────────────────────────────────────────────────
 def compute_nonresponders_current_month(sb_names: list[str], responses_df: pd.DataFrame, month_key: str) -> pd.DataFrame:
     base = pd.DataFrame({"Serving Guy": sorted({n for n in sb_names if n})})
