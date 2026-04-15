@@ -2,7 +2,8 @@
 # uKids Guys Availability Form
 # - NO director
 # - UI: 2 sections with MOBILE-FRIENDLY CHECKBOXES (morning + evening)
-# - Output: STILL writes Yes/No into each service column in Google Sheets (like your current sheet)
+# - Output: writes Yes/No into each service column in Google Sheets
+# - Deadlines now read from: "Guys Deadlines"
 
 import time
 import random
@@ -60,8 +61,9 @@ st.markdown(
 # ──────────────────────────────────────────────────────────────────────────────
 TAB_RESPONSES = "uKids Guys responses"
 TAB_SB = "uKids Guys SB"
-TAB_DEADLINES = "Deadlines"
+TAB_DEADLINES = "Guys Deadlines"          # ✅ CHANGED
 TAB_DATES = "Kids & Guys ServiceDates"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Secrets helpers
@@ -157,14 +159,15 @@ def ws_get_df(ws) -> pd.DataFrame:
     values = gs_retry(ws.get_all_values)
     if not values:
         return pd.DataFrame()
+
     header, rows = values[0], values[1:]
 
-    # If SB is a list of names without header
+    # If SB is a list of names without a header
     if not header or all(str(h).strip() == "" for h in header):
         flat = [r[0] for r in rows if r and str(r[0]).strip()]
         return pd.DataFrame(flat, columns=["Name"])
 
-    # If first name mistakenly in header row
+    # If first name accidentally sits in row 1
     if len(header) == 1 and header[0] and (not rows or (rows and len(rows[0]) <= 1)):
         maybe_first = str(header[0]).strip()
         if maybe_first.lower() not in ("name", "serving guy", "person", "serving person"):
@@ -300,7 +303,7 @@ def _display_date_only(label: str) -> str:
 def _build_display_map(labels: list[str]) -> dict:
     """
     display text -> actual label
-    Ensures display text is unique (adds (2), (3) if needed).
+    Ensures display text is unique.
     """
     display_map = {}
     used = set()
@@ -366,7 +369,7 @@ service_dates_all["date"] = service_dates_all["date"].astype(str).str.strip()
 service_dates_all["label"] = service_dates_all["label"].astype(str).str.strip()
 service_dates_all["is_service_day"] = service_dates_all["is_service_day"].astype(str).str.strip()
 
-# Base TZ
+# Base TZ from Guys Deadlines
 BASE_TZ = "Africa/Johannesburg"
 try:
     tz0 = str(deadlines_df["timezone"].iloc[0]).strip()
@@ -397,14 +400,14 @@ if month_dates.empty:
 month_dates["_sort"] = month_dates["date"].map(_safe_parse_date_ymd)
 month_dates = month_dates.sort_values("_sort").drop(columns=["_sort"])
 
-# These are the ACTUAL label columns we must write to the sheet
+# These are the actual column names to write
 date_labels = month_dates["label"].astype(str).tolist()
 
 # Split labels
 morning_labels = [l for l in date_labels if "morning" in l.lower()]
 evening_labels = [l for l in date_labels if "evening" in l.lower()]
 
-# display->label maps
+# display -> label maps
 morning_display_map = _build_display_map(morning_labels)
 evening_display_map = _build_display_map(evening_labels)
 morning_options = list(morning_display_map.keys())
@@ -439,7 +442,7 @@ if is_closed:
     )
     st.stop()
 
-# Info header (no auto-refresh)
+# Info header
 now_local = get_now_in_tz(deadline_tz)
 remaining_seconds = (deadline_dt - now_local).total_seconds()
 
@@ -472,7 +475,7 @@ answers["Q_NAME"] = st.selectbox("Please select your name", options=[""] + guys,
 
 st.subheader(f"Availability for {target_month_key}")
 
-# ── MOBILE FRIENDLY: CHECKBOX LISTS + Select all / Clear buttons ──
+# MOBILE-FRIENDLY CHECKBOX LISTS
 st.markdown("### Which morning services are you available?")
 m1, m2 = st.columns(2)
 with m1:
@@ -524,14 +527,13 @@ with c3:
     st.metric("Evening selected", len(answers.get("EVENING_SELECTED", [])))
 
 # ─────────────────────────────────────────────────────────────
-# Submit (sticky)
+# Submit
 # ─────────────────────────────────────────────────────────────
 st.markdown('<div class="sticky-submit">', unsafe_allow_html=True)
 submitted = st.button("Submit")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if submitted:
-    # Hard deadline check
     now_check = get_now_in_tz(deadline_tz)
     if (deadline_dt - now_check).total_seconds() <= 0:
         st.error("Form is closed.")
@@ -541,7 +543,7 @@ if submitted:
         st.error("Please select your name.")
         st.stop()
 
-    # Convert selected display options back to actual label columns
+    # Convert display selections back to actual service labels
     selected_morning_labels = {
         morning_display_map[d] for d in answers.get("MORNING_SELECTED", []) if d in morning_display_map
     }
@@ -550,7 +552,7 @@ if submitted:
     }
     selected_all = selected_morning_labels.union(selected_evening_labels)
 
-    # Build Yes/No map for each service label (keeps your sheet format)
+    # Build Yes/No map
     yes_map = {lbl: ("Yes" if lbl in selected_all else "No") for lbl in date_labels}
 
     now = datetime.utcnow().isoformat() + "Z"
@@ -580,7 +582,7 @@ if submitted:
     st.code(report_text, language=None)
 
 # ─────────────────────────────────────────────────────────────
-# Admin: exports + non-responders (current month)
+# Admin
 # ─────────────────────────────────────────────────────────────
 def compute_nonresponders_current_month(sb_names: list[str], responses_df: pd.DataFrame, month_key: str) -> pd.DataFrame:
     base = pd.DataFrame({"Serving Guy": sorted({n for n in sb_names if n})})
@@ -632,3 +634,27 @@ with st.expander("Admin"):
         nonresp_df = compute_nonresponders_current_month(guys, responses_df, target_month_key)
         st.write(f"Shown: **{len(nonresp_df)}**  |  Total guys in SB: **{len(guys)}**")
         st.dataframe(nonresp_df[["Serving Guy", "Status"]], use_container_width=True)
+
+        st.divider()
+        st.markdown("#### 🔍 Secrets / Sheets check")
+        try:
+            s = st.secrets
+            gsa = s.get("gcp_service_account", {})
+            gs_id = s.get("GSHEET_ID") or s.get("general", {}).get("GSHEET_ID")
+            st.write(
+                {
+                    "GSHEET_ID_present": bool(gs_id),
+                    "client_email": gsa.get("client_email", "(missing)"),
+                    "private_key_present": bool(gsa.get("private_key")),
+                    "gspread_installed": gspread is not None,
+                    "tabs_expected": [TAB_RESPONSES, TAB_SB, TAB_DEADLINES, TAB_DATES],
+                }
+            )
+            sh = get_spreadsheet()
+            ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=250)
+            ensure_worksheet(sh, TAB_SB, rows=4000, cols=20)
+            ensure_worksheet(sh, TAB_DEADLINES, rows=500, cols=10)
+            ensure_worksheet(sh, TAB_DATES, rows=4000, cols=10)
+            st.success(f"✅ Auth OK. Opened sheet: {sh.title}")
+        except Exception as e:
+            st.error(f"❌ Diagnostics failed: {e}")
