@@ -2,8 +2,10 @@
 # uKids Guys Availability Form
 # - NO director
 # - UI: 2 sections with MOBILE-FRIENDLY CHECKBOXES (morning + evening)
-# - Output: writes Yes/No into each service column in Google Sheets
-# - Deadlines now read from: "Guys Deadlines"
+# - Raw output: writes Yes/No into each service column in "uKids Guys responses"
+# - Admin can rebuild "Final Guys Responses" into long format:
+#     timestamp | Service | Name
+# - Deadlines read from: "Guys Deadlines"
 
 import time
 import random
@@ -60,8 +62,9 @@ st.markdown(
 # Google Sheets tabs
 # ──────────────────────────────────────────────────────────────────────────────
 TAB_RESPONSES = "uKids Guys responses"
+TAB_FINAL_RESPONSES = "Final Guys Responses"
 TAB_SB = "uKids Guys SB"
-TAB_DEADLINES = "Guys Deadlines"          # ✅ CHANGED
+TAB_DEADLINES = "Guys Deadlines"
 TAB_DATES = "Kids & Guys ServiceDates"
 
 
@@ -217,6 +220,13 @@ def fetch_responses_df() -> pd.DataFrame:
     return ws_get_df(ws)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_final_responses_df() -> pd.DataFrame:
+    sh = get_spreadsheet()
+    ws = ensure_worksheet(sh, TAB_FINAL_RESPONSES, rows=8000, cols=20)
+    return ws_get_df(ws)
+
+
 def append_response_row(desired_header: list[str], row_map: dict):
     sh = get_spreadsheet()
     ws = ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=max(250, len(desired_header) + 10))
@@ -226,7 +236,13 @@ def append_response_row(desired_header: list[str], row_map: dict):
 
 
 def clear_caches():
-    for fn in (fetch_sb_df, fetch_deadlines_df, fetch_service_dates_df, fetch_responses_df):
+    for fn in (
+        fetch_sb_df,
+        fetch_deadlines_df,
+        fetch_service_dates_df,
+        fetch_responses_df,
+        fetch_final_responses_df,
+    ):
         try:
             fn.clear()
         except Exception:
@@ -235,6 +251,77 @@ def clear_caches():
         st.cache_data.clear()
     except Exception:
         pass
+
+
+def build_final_guys_df(responses_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert wide raw responses into long format:
+    timestamp | Service | Name
+
+    One YES service = one row.
+    """
+    if responses_df is None or responses_df.empty:
+        return pd.DataFrame(columns=["timestamp", "Service", "Name"])
+
+    df = responses_df.copy()
+
+    for col in ["timestamp", "Serving Guy"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    meta_cols = {
+        "timestamp",
+        "Availability month",
+        "Serving Guy",
+        "Director",
+        "Serving Girl",
+        "Name",
+        "Service",
+    }
+    service_cols = [c for c in df.columns if c not in meta_cols]
+
+    rows = []
+    for _, row in df.iterrows():
+        ts = str(row.get("timestamp", "")).strip()
+        name = str(row.get("Serving Guy", "")).strip()
+
+        if not name:
+            continue
+
+        for service in service_cols:
+            val = str(row.get(service, "")).strip().lower()
+            if val == "yes":
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "Service": service,
+                        "Name": name,
+                    }
+                )
+
+    out = pd.DataFrame(rows, columns=["timestamp", "Service", "Name"])
+    if out.empty:
+        return pd.DataFrame(columns=["timestamp", "Service", "Name"])
+    return out
+
+
+def replace_final_guys_responses_tab(final_df: pd.DataFrame):
+    """
+    Fully replace the Final Guys Responses tab with rebuilt data.
+    """
+    sh = get_spreadsheet()
+    ws = ensure_worksheet(sh, TAB_FINAL_RESPONSES, rows=8000, cols=10)
+
+    desired_header = ["timestamp", "Service", "Name"]
+    data_rows = final_df.values.tolist() if not final_df.empty else []
+
+    try:
+        gs_retry(ws.clear)
+    except Exception:
+        pass
+
+    all_rows = [desired_header] + data_rows
+    gs_retry(ws.update, "A1", all_rows)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -369,7 +456,7 @@ service_dates_all["date"] = service_dates_all["date"].astype(str).str.strip()
 service_dates_all["label"] = service_dates_all["label"].astype(str).str.strip()
 service_dates_all["is_service_day"] = service_dates_all["is_service_day"].astype(str).str.strip()
 
-# Base TZ from Guys Deadlines
+# Base TZ
 BASE_TZ = "Africa/Johannesburg"
 try:
     tz0 = str(deadlines_df["timezone"].iloc[0]).strip()
@@ -620,6 +707,7 @@ with st.expander("Admin"):
             st.error("Incorrect admin key.")
     else:
         st.success("Admin unlocked.")
+
         try:
             responses_df = fetch_responses_df()
         except Exception as e:
@@ -629,7 +717,29 @@ with st.expander("Admin"):
         st.write(f"Total submissions (all months): **{len(responses_df)}**")
         if not responses_df.empty:
             st.dataframe(responses_df, use_container_width=True)
+        else:
+            st.warning("No submissions yet.")
 
+        st.divider()
+        st.markdown("### 🔄 Build Final Guys Responses")
+
+        final_preview_df = build_final_guys_df(responses_df)
+        st.write(f"Rows that will be written: **{len(final_preview_df)}**")
+
+        if not final_preview_df.empty:
+            st.dataframe(final_preview_df, use_container_width=True)
+        else:
+            st.info("No YES services found yet.")
+
+        if st.button("Rebuild Final Guys Responses tab"):
+            try:
+                replace_final_guys_responses_tab(final_preview_df)
+                clear_caches()
+                st.success(f"Final Guys Responses rebuilt successfully with {len(final_preview_df)} row(s).")
+            except Exception as e:
+                st.error(f"Failed to rebuild Final Guys Responses: {e}")
+
+        st.divider()
         st.markdown("### ❌ Non-responders (current month only)")
         nonresp_df = compute_nonresponders_current_month(guys, responses_df, target_month_key)
         st.write(f"Shown: **{len(nonresp_df)}**  |  Total guys in SB: **{len(guys)}**")
@@ -647,11 +757,18 @@ with st.expander("Admin"):
                     "client_email": gsa.get("client_email", "(missing)"),
                     "private_key_present": bool(gsa.get("private_key")),
                     "gspread_installed": gspread is not None,
-                    "tabs_expected": [TAB_RESPONSES, TAB_SB, TAB_DEADLINES, TAB_DATES],
+                    "tabs_expected": [
+                        TAB_RESPONSES,
+                        TAB_FINAL_RESPONSES,
+                        TAB_SB,
+                        TAB_DEADLINES,
+                        TAB_DATES,
+                    ],
                 }
             )
             sh = get_spreadsheet()
             ensure_worksheet(sh, TAB_RESPONSES, rows=8000, cols=250)
+            ensure_worksheet(sh, TAB_FINAL_RESPONSES, rows=8000, cols=10)
             ensure_worksheet(sh, TAB_SB, rows=4000, cols=20)
             ensure_worksheet(sh, TAB_DEADLINES, rows=500, cols=10)
             ensure_worksheet(sh, TAB_DATES, rows=4000, cols=10)
